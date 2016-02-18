@@ -46,6 +46,7 @@ recognizable text. More exactly, it will return all images that include text
 with the same stems.
 """
 
+import pprint
 import argparse
 # [START detect_text]
 import base64
@@ -72,31 +73,42 @@ class VisionApi:
             'vision', 'v1', credentials=self.credentials,
             discoveryServiceUrl=DISCOVERY_URL)
 
-    def detect_text(self, image_file, num_retries=3, max_results=6):
+    def detect_text(self, images, num_retries=3, max_results=6):
         """Uses the Vision API to detect text in the given file.
         """
-        image_content = image_file.read()
 
-        batch_request = [{
-            'image': {
-                'content': base64.b64encode(image_content)
-            },
-            'features': [{
-                'type': 'TEXT_DETECTION',
-                'maxResults': max_results,
-            }]
-        }]
+        batch_request = []
+        for image in images:
+            batch_request.append({
+                'image': {
+                    'content': base64.b64encode(images[image])
+                },
+                'features': [{
+                    'type': 'TEXT_DETECTION',
+                    'maxResults': max_results,
+                }]
+            })
         request = self.service.images().annotate(
             body={'requests': batch_request})
 
         try:
-            response = request.execute(num_retries=num_retries)
-            if ('responses' in response
-               and 'textAnnotations' in response['responses'][0]):
-                text_response = response['responses'][0]['textAnnotations']
-                return text_response
-            else:
-                return []
+            responses = request.execute(num_retries=num_retries)
+            if 'responses' not in responses:
+                return {}
+            text_response = {}
+            for image, response in zip(images, responses['responses']):
+                if 'error' in response:
+                    print("API Error for %s: %s" % (
+                            image,
+                            response['error']['message']
+                                if 'message' in response['error']
+                                else ''))
+                    continue
+                if 'textAnnotations' in response:
+                    text_response[image] = response['textAnnotations']
+                else:
+                    text_response[image] = []
+            return text_response
         except errors.HttpError, e:
             print("Http Error for %s: %s" % (image_file, e))
         except KeyError, e2:
@@ -228,12 +240,34 @@ def extract_descriptions(input_filename, index, texts):
 # [END extract_descrs]
 
 
+def batch(iterable, batch_size=4):
+    """Group an iterable into batches of size batch_size.
+
+    >>> tuple(batch([1, 2, 3, 4, 5], batch_size=2))
+    ((1, 2), (3, 4), (5))
+    """
+    b = []
+    for i in iterable:
+        b.append(i)
+        if len(b) == batch_size:
+            yield tuple(b)
+            b = []
+    if b:
+        yield tuple(b)
+
+
+
+
 # [START get_text]
-def get_text_from_file(vision, index, input_filename):
+def get_text_from_files(vision, index, input_filenames):
     """Call the Vision API on a file and index the results."""
-    with open(input_filename, 'rb') as image:
-        texts = vision.detect_text(image)
-        extract_descriptions(input_filename, index, texts)
+    images = {}
+    for filename in input_filenames:
+        with open(filename, 'rb') as image_file:
+            images[filename] = image_file.read()
+    texts = vision.detect_text(images)
+    for filename, text in texts.items():
+        extract_descriptions(filename, index, text)
 
 
 def main(input_dir):
@@ -246,18 +280,22 @@ def main(input_dir):
     # Create an Index object to build query the inverted index.
     index = Index()
 
-    fileslist = []
+    allfileslist = []
     # Recursively construct a list of all the files in the given input
     # directory.
     for folder, subs, files in os.walk(input_dir):
         for filename in files:
-            fileslist.append(os.path.join(folder, filename))
+            allfileslist.append(os.path.join(folder, filename))
 
-    for filename in fileslist:
+    fileslist = []
+    for filename in allfileslist:
         # Look for text in any files that have not yet been processed.
         if index.document_is_processed(filename):
             continue
-        get_text_from_file(vision, index, filename)
+        fileslist.append(filename)
+
+    for filenames in batch(fileslist):
+        get_text_from_files(vision, index, filenames)
 # [END get_text]
 
 if __name__ == '__main__':
